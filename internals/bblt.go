@@ -21,8 +21,6 @@ var (
 	normalStyle  = lipgloss.NewStyle().Margin(1, 2)
 	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000"))
 	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
-	username     string
-	rootModel    repoModel
 )
 
 type item struct {
@@ -35,6 +33,7 @@ func (i item) Description() string { return i.url }
 func (i item) FilterValue() string { return i.name }
 
 type repoModel struct {
+	username   string
 	repos      []*github.Repository
 	list       list.Model
 	err        error
@@ -45,22 +44,22 @@ type repoModel struct {
 }
 
 type usernameModel struct {
+	rootModel repoModel
+	username  string
 	textInput textinput.Model
 	err       error
 }
 
-func prepUsernameModel() usernameModel {
+func prepUsernameModel(username string, rootModel repoModel) usernameModel {
 	ti := textinput.New()
-	ti.Placeholder = ""
-	if username != "" {
-		ti.Placeholder = username
-	}
-
+	ti.SetValue(username)
 	ti.Focus()
 	ti.Cursor.Focus()
 	ti.CharLimit = 64
 
 	return usernameModel{
+		rootModel: rootModel,
+		username:  username,
 		textInput: ti,
 		err:       nil,
 	}
@@ -80,13 +79,17 @@ func (m usernameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case tea.KeyEnter:
-			return initialModel(), nil
+			username := strings.TrimSpace(m.textInput.Value())
+			if username == "" {
+				return m, nil
+			}
+			return initialModel(username), nil
 
 		case tea.KeyEsc:
-			if username == "" {
+			if m.username == "" {
 				return m, tea.Quit
 			} else {
-				return rootModel, nil
+				return m.rootModel, nil
 			}
 
 		}
@@ -145,6 +148,9 @@ func (m repoModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cloneRepo(selectedItem.url),
 			)
 		}
+		if msg.String() == "c" && !m.cloning {
+			return prepUsernameModel(m.username, m), nil
+		}
 	case tea.WindowSizeMsg:
 		h, v := normalStyle.GetFrameSize()
 		m.list.SetSize(msg.Width-h, msg.Height-v)
@@ -201,22 +207,28 @@ func (m repoModel) View() string {
 	return normalStyle.Render(m.list.View())
 }
 
-func initialModel() tea.Model {
+func initialModel(username string) tea.Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
-	cmd := exec.Command("git", "config", "user.name")
-	out, err := cmd.CombinedOutput()
-	if err != nil || username == "" {
-		return usernameModel{}
-	} else {
-		username = string(out)
+	repos, err := fetchRepos(username)
+	if err != nil {
+		return repoModel{
+			username: username,
+			err:      err,
+			spinner:  sp,
+			list:     list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0),
+		}
 	}
 
-	repos, err := fetchRepos()
-	if err != nil {
-		return repoModel{err: err}
+	if len(repos) <= 0 {
+		return repoModel{
+			username: username,
+			err:      err,
+			spinner:  sp,
+			list:     list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0),
+		}
 	}
 
 	items := make([]list.Item, len(repos))
@@ -256,16 +268,17 @@ func initialModel() tea.Model {
 		}
 	}
 
-	rootModel = repoModel{
-		repos:   repos,
-		list:    l,
-		spinner: sp,
-	}
+	l.SetSize(80, 24)
 
-	return rootModel
+	return repoModel{
+		username: username,
+		repos:    repos,
+		list:     l,
+		spinner:  sp,
+	}
 }
 
-func fetchRepos() ([]*github.Repository, error) {
+func fetchRepos(username string) ([]*github.Repository, error) {
 	ctx := context.Background()
 	token := os.Getenv("GITHUB_TOKEN")
 
@@ -299,7 +312,18 @@ func fetchRepos() ([]*github.Repository, error) {
 }
 
 func BbltRun() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	var model tea.Model
+
+	cmd := exec.Command("git", "config", "user.name")
+	out, err := cmd.CombinedOutput()
+	un := strings.TrimSpace(string(out))
+	if err != nil && un == "" {
+		model = prepUsernameModel("", repoModel{})
+	} else {
+		model = initialModel(un)
+	}
+
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error running program: %v", err)
 		os.Exit(1)
